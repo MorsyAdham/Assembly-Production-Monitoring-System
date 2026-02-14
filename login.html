@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Assembly Production Monitoring System - Login">
+    <meta name="author" content="Adham Morsy">
+    <title>Login - Assembly Production System</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/img/logo1_circle_background.png">
+    <link rel="stylesheet" href="assets/styles/style.css">
+</head>
+
+<body class="login-page">
+
+    <div class="login-container">
+        <div class="login-box">
+            <div class="login-header">
+                <img src="assets/img/logo.png" alt="Company Logo" class="login-logo"
+                    onerror="this.style.display='none'">
+                <h2>Assembly Production System</h2>
+                <p class="subtitle">Sign in to continue</p>
+            </div>
+
+            <form id="loginForm" onsubmit="return false;">
+                <div class="form-group">
+                    <label for="username">Username</label>
+                    <input type="text" id="username" name="username" placeholder="Enter your username"
+                        class="login-input" autocomplete="username" required autofocus>
+                </div>
+
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" placeholder="Enter your password"
+                        class="login-input" autocomplete="current-password" required>
+                </div>
+
+                <button type="submit" class="btn btn-primary login-btn" id="loginBtn">
+                    <span id="loginBtnText">Login</span>
+                    <span id="loginSpinner" class="spinner" style="display: none;"></span>
+                </button>
+
+                <p id="error" class="error-msg"></p>
+            </form>
+
+            <div class="login-footer">
+                <p class="muted">Secure authentication with SHA-256 encryption</p>
+            </div>
+        </div>
+
+        <div class="info-panel">
+            <h3>Welcome to Assembly Production System</h3>
+            <div class="feature-list">
+                <div class="feature-item">
+                    <span class="feature-icon">🔐</span>
+                    <div>
+                        <strong>Secure Access</strong>
+                        <p>Role-based authentication and authorization</p>
+                    </div>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">📊</span>
+                    <div>
+                        <strong>Real-Time Monitoring</strong>
+                        <p>Track production status across all vehicles</p>
+                    </div>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">📝</span>
+                    <div>
+                        <strong>Request Management</strong>
+                        <p>Efficiently manage station and part requests</p>
+                    </div>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">📈</span>
+                    <div>
+                        <strong>Analytics & Reports</strong>
+                        <p>Export data and generate comprehensive reports</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="version-info">
+                <p>Version 1.0.0 | © 2026 Adham Morsy</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- CDN LIBRARIES -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.39.0/dist/umd/supabase.min.js"></script>
+
+    <!-- APPLICATION SCRIPT -->
+    <script src="assets/scripts/app.js"></script>
+</body>
+
+</html>
