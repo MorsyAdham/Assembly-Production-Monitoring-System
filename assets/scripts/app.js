@@ -1,7 +1,7 @@
 // ==================== ASSEMBLY PRODUCTION MONITORING SYSTEM ====================
-// Version: 1.0.0
+// Version: 2.0.0 - With Audit Logging & Telegram Integration
 // Author: Adham Morsy
-// Description: Complete application logic for Assembly Production Monitoring System
+// Description: Complete application logic with audit trail and notifications
 
 // ==================== SUPABASE CONFIGURATION ====================
 const SUPABASE_URL = "https://biqwfqkuhebxcfucangt.supabase.co";
@@ -21,8 +21,14 @@ let allRequests = [];
 let allVehicles = [];
 let allProductionStatus = [];
 let allUsers = [];
+let allAuditLogs = [];
 let chartInstances = {};
-let filteredRequests = []; // Stores filtered requests for PDF exports
+let filteredRequests = [];
+let telegramConfig = null;
+let currentProductionFilters = {
+    vehicle: '',
+    status: ''
+};
 
 // Station configurations
 const STATIONS = {
@@ -31,11 +37,153 @@ const STATIONS = {
     K11: ['A01', 'A12', 'A13', 'A14', 'A15', 'A16']
 };
 
-// ==================== UTILITY FUNCTIONS ====================
+// ==================== AUDIT LOGGING FUNCTIONS ====================
 
 /**
- * Hash password using SHA-256
+ * Log action to audit trail
  */
+async function logAudit(actionType, entityType, entityId, oldValues, newValues, description) {
+    try {
+        const auditData = {
+            username: currentUser?.username || 'system',
+            user_id: currentUser?.id || null,
+            user_role: currentUser?.role || null,
+            action_type: actionType,
+            entity_type: entityType,
+            entity_id: entityId,
+            old_values: oldValues ? JSON.stringify(oldValues) : null,
+            new_values: newValues ? JSON.stringify(newValues) : null,
+            description: description,
+            ip_address: await getClientIP()
+        };
+
+        const { data, error } = await supabase
+            .from('assembly_audit_logs')
+            .insert([auditData])
+            .select();
+
+        if (error) {
+            console.error('Audit log error:', error);
+            return null;
+        }
+
+        // Send Telegram notification
+        await sendTelegramNotification(auditData);
+
+        return data[0];
+    } catch (err) {
+        console.error('Error logging audit:', err);
+        return null;
+    }
+}
+
+/**
+ * Get client IP address (best effort)
+ */
+async function getClientIP() {
+    try {
+        const response = await fetch('https://api.ipify.org?format=json');
+        const data = await response.json();
+        return data.ip;
+    } catch {
+        return 'unknown';
+    }
+}
+
+/**
+ * Fetch Telegram configuration
+ */
+async function fetchTelegramConfig() {
+    try {
+        const { data, error } = await supabase
+            .from('telegram_config')
+            .select('*')
+            .single();
+
+        if (error) throw error;
+        telegramConfig = data;
+        return data;
+    } catch (err) {
+        console.error('Error fetching Telegram config:', err);
+        return null;
+    }
+}
+
+/**
+ * Send Telegram notification
+ */
+async function sendTelegramNotification(auditData) {
+    if (!telegramConfig || !telegramConfig.enabled) return;
+
+    try {
+        const actionEmoji = {
+            'login': '🔐',
+            'create': '✅',
+            'update': '✏️',
+            'delete': '🗑️'
+        };
+
+        const entityEmoji = {
+            'request': '📝',
+            'vehicle': '🚗',
+            'production_status': '🏭',
+            'user': '👤',
+            'session': '🔑'
+        };
+
+        const message = `
+${actionEmoji[auditData.action_type] || '📌'} *Assembly Production System*
+
+*Action:* ${auditData.action_type.toUpperCase()}
+*Entity:* ${entityEmoji[auditData.entity_type] || ''} ${auditData.entity_type}
+*User:* ${auditData.username} (${auditData.user_role || 'N/A'})
+*Description:* ${auditData.description}
+*Time:* ${new Date().toLocaleString()}
+*IP:* ${auditData.ip_address}
+${auditData.new_values ? `\n*Details:* \`${JSON.stringify(JSON.parse(auditData.new_values)).substring(0, 200)}\`` : ''}
+        `.trim();
+
+        const telegramApiUrl = `https://api.telegram.org/bot${telegramConfig.bot_token}/sendMessage`;
+        
+        await fetch(telegramApiUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                chat_id: telegramConfig.chat_id,
+                text: message,
+                parse_mode: 'Markdown'
+            })
+        });
+
+    } catch (err) {
+        console.error('Error sending Telegram notification:', err);
+    }
+}
+
+/**
+ * Fetch audit logs
+ */
+async function fetchAuditLogs() {
+    try {
+        const { data, error } = await supabase
+            .from('assembly_audit_logs')
+            .select('*')
+            .order('timestamp', { ascending: false })
+            .limit(500);
+
+        if (error) throw error;
+        allAuditLogs = data || [];
+        return allAuditLogs;
+    } catch (err) {
+        console.error('Error fetching audit logs:', err);
+        return [];
+    }
+}
+
+// ==================== UTILITY FUNCTIONS ====================
+
 async function hashPassword(password) {
     const encoder = new TextEncoder();
     const data = encoder.encode(password);
@@ -45,9 +193,6 @@ async function hashPassword(password) {
     return hashHex;
 }
 
-/**
- * Format date to readable string
- */
 function formatDate(dateString) {
     if (!dateString) return '-';
     const date = new Date(dateString);
@@ -60,9 +205,6 @@ function formatDate(dateString) {
     });
 }
 
-/**
- * Show error message
- */
 function showError(elementId, message) {
     const el = document.getElementById(elementId);
     if (el) {
@@ -74,9 +216,6 @@ function showError(elementId, message) {
     }
 }
 
-/**
- * Show success message
- */
 function showSuccess(elementId, message) {
     const el = document.getElementById(elementId);
     if (el) {
@@ -88,9 +227,6 @@ function showSuccess(elementId, message) {
     }
 }
 
-/**
- * Debounce function for search inputs
- */
 function debounce(func, wait) {
     let timeout;
     return function executedFunction(...args) {
@@ -105,9 +241,6 @@ function debounce(func, wait) {
 
 // ==================== AUTHENTICATION ====================
 
-/**
- * Check if user is authenticated
- */
 function checkAuth() {
     const userStr = sessionStorage.getItem('currentUser');
     
@@ -125,7 +258,6 @@ function checkAuth() {
     
     currentUser = JSON.parse(userStr);
     
-    // Update UI with user info
     const emailEl = document.getElementById('userEmail');
     const roleEl = document.getElementById('userRole');
     
@@ -135,15 +267,11 @@ function checkAuth() {
         roleEl.className = `user-badge role-badge ${currentUser.role.replace('_', '-')}`;
     }
     
-    // Show/hide sections based on role
     applyRolePermissions();
     
     return true;
 }
 
-/**
- * Login function
- */
 async function login() {
     const username = document.getElementById('username').value.trim();
     const password = document.getElementById('password').value.trim();
@@ -152,26 +280,21 @@ async function login() {
     const loginBtnText = document.getElementById('loginBtnText');
     const loginSpinner = document.getElementById('loginSpinner');
     
-    // Clear previous errors
     errorEl.textContent = '';
     errorEl.style.display = 'none';
     
-    // Validation
     if (!username || !password) {
         showError('error', 'Please enter both username and password');
         return;
     }
     
-    // Show loading state
     loginBtn.disabled = true;
     loginBtnText.style.display = 'none';
     loginSpinner.style.display = 'inline-block';
     
     try {
-        // Hash password
         const passwordHash = await hashPassword(password);
         
-        // Query database
         const { data, error } = await supabase
             .from('users')
             .select('*')
@@ -181,65 +304,87 @@ async function login() {
         
         if (error || !data) {
             showError('error', 'Invalid username or password');
+            
+            await logAudit(
+                'login',
+                'session',
+                null,
+                null,
+                { username, success: false },
+                `Failed login attempt for user: ${username}`
+            );
             return;
         }
         
-        // Store session
         sessionStorage.setItem('currentUser', JSON.stringify({
             username: data.username,
             role: data.role,
             id: data.id
         }));
         
-        // Redirect to dashboard
+        currentUser = {
+            username: data.username,
+            role: data.role,
+            id: data.id
+        };
+        
+        await logAudit(
+            'login',
+            'session',
+            data.id,
+            null,
+            { username: data.username, role: data.role },
+            `User ${data.username} logged in successfully`
+        );
+        
         window.location.href = 'index.html';
         
     } catch (err) {
         console.error('Login error:', err);
         showError('error', 'An error occurred during login. Please try again.');
     } finally {
-        // Reset loading state
         loginBtn.disabled = false;
         loginBtnText.style.display = 'inline';
         loginSpinner.style.display = 'none';
     }
 }
 
-/**
- * Logout function
- */
 function logout() {
+    if (currentUser) {
+        logAudit(
+            'login',
+            'session',
+            currentUser.id,
+            null,
+            { username: currentUser.username, action: 'logout' },
+            `User ${currentUser.username} logged out`
+        );
+    }
+    
     sessionStorage.removeItem('currentUser');
     window.location.href = 'login.html';
 }
 
-/**
- * Apply role-based permissions
- */
 function applyRolePermissions() {
     if (!currentUser) return;
     
     const role = currentUser.role;
     
-    // User Management (master_admin only)
     const userMgmtSection = document.getElementById('userManagementSection');
     if (userMgmtSection) {
         userMgmtSection.style.display = role === 'master_admin' ? 'block' : 'none';
     }
     
-    // Add Request Section (admin, master_admin, customer)
     const addRequestSection = document.getElementById('addRequestSection');
     if (addRequestSection) {
         addRequestSection.style.display = ['master_admin', 'admin', 'customer'].includes(role) ? 'block' : 'none';
     }
     
-    // Add Vehicle Section (admin, master_admin)
     const addVehicleSection = document.getElementById('addVehicleSection');
     if (addVehicleSection) {
         addVehicleSection.style.display = ['master_admin', 'admin'].includes(role) ? 'block' : 'none';
     }
     
-    // Actions columns in tables (admin, master_admin)
     const actionsHeader = document.getElementById('actionsHeader');
     const prodActionsHeader = document.getElementById('prodActionsHeader');
     if (actionsHeader) {
@@ -248,13 +393,15 @@ function applyRolePermissions() {
     if (prodActionsHeader) {
         prodActionsHeader.style.display = ['master_admin', 'admin'].includes(role) ? 'table-cell' : 'none';
     }
+    
+    const auditLogsBtn = document.getElementById('auditLogsBtn');
+    if (auditLogsBtn) {
+        auditLogsBtn.style.display = role === 'master_admin' ? 'inline-flex' : 'none';
+    }
 }
 
 // ==================== DATA FETCHING ====================
 
-/**
- * Fetch all requests
- */
 async function fetchRequests() {
     try {
         const { data, error } = await supabase
@@ -266,7 +413,6 @@ async function fetchRequests() {
         
         allRequests = data || [];
         
-        // Filter for customer role - show only their requests
         if (currentUser && currentUser.role === 'customer') {
             allRequests = allRequests.filter(r => r.requested_by === currentUser.username);
         }
@@ -278,9 +424,6 @@ async function fetchRequests() {
     }
 }
 
-/**
- * Fetch all vehicles
- */
 async function fetchVehicles() {
     try {
         const { data, error } = await supabase
@@ -297,9 +440,6 @@ async function fetchVehicles() {
     }
 }
 
-/**
- * Fetch production status
- */
 async function fetchProductionStatus() {
     try {
         const { data, error } = await supabase
@@ -316,9 +456,6 @@ async function fetchProductionStatus() {
     }
 }
 
-/**
- * Fetch all users (master_admin only)
- */
 async function fetchUsers() {
     if (currentUser.role !== 'master_admin') return [];
     
@@ -337,18 +474,14 @@ async function fetchUsers() {
     }
 }
 
-// ==================== CRUD OPERATIONS ====================
+// ==================== CRUD OPERATIONS WITH AUDIT LOGGING ====================
 
-/**
- * Create new request
- */
 async function createRequest() {
     const vehicleType = document.getElementById('reqVehicleType').value;
     const vehicleNumber = document.getElementById('reqVehicleNumber').value;
     const stationCode = document.getElementById('reqStationCode').value;
     const requestType = document.getElementById('reqType').value;
     
-    // Validation
     if (!vehicleType || !vehicleNumber || !stationCode || !requestType) {
         showError('requestError', 'Please fill in all required fields');
         return;
@@ -364,7 +497,6 @@ async function createRequest() {
         fastener: false
     };
     
-    // Add part-specific fields if type is 'part'
     if (requestType === 'part') {
         const partNumber = document.getElementById('reqPartNumber').value.trim();
         const qty = parseInt(document.getElementById('reqQty').value);
@@ -388,9 +520,17 @@ async function createRequest() {
         
         if (error) throw error;
         
+        await logAudit(
+            'create',
+            'request',
+            data[0].id,
+            null,
+            requestData,
+            `Created ${requestType} request for ${vehicleNumber} at station ${stationCode}`
+        );
+        
         showSuccess('requestSuccess', 'Request created successfully!');
         
-        // Reset form
         document.getElementById('reqVehicleType').value = '';
         document.getElementById('reqVehicleNumber').value = '';
         document.getElementById('reqStationCode').value = '';
@@ -400,7 +540,6 @@ async function createRequest() {
         document.getElementById('reqFastener').checked = false;
         document.getElementById('partFields').style.display = 'none';
         
-        // Refresh data
         await refreshDashboard();
         
     } catch (err) {
@@ -409,11 +548,10 @@ async function createRequest() {
     }
 }
 
-/**
- * Update request status
- */
 async function updateRequestStatus(requestId, newStatus) {
     try {
+        const oldRequest = allRequests.find(r => r.id === requestId);
+        
         const { data, error } = await supabase
             .from('requests')
             .update({ status: newStatus })
@@ -421,6 +559,15 @@ async function updateRequestStatus(requestId, newStatus) {
             .select();
         
         if (error) throw error;
+        
+        await logAudit(
+            'update',
+            'request',
+            requestId,
+            { status: oldRequest.status },
+            { status: newStatus },
+            `Updated request status from ${oldRequest.status} to ${newStatus} for vehicle ${oldRequest.vehicle_number}`
+        );
         
         await refreshDashboard();
         
@@ -430,19 +577,27 @@ async function updateRequestStatus(requestId, newStatus) {
     }
 }
 
-/**
- * Delete request
- */
 async function deleteRequest(requestId) {
     if (!confirm('Are you sure you want to delete this request?')) return;
     
     try {
+        const request = allRequests.find(r => r.id === requestId);
+        
         const { error } = await supabase
             .from('requests')
             .delete()
             .eq('id', requestId);
         
         if (error) throw error;
+        
+        await logAudit(
+            'delete',
+            'request',
+            requestId,
+            request,
+            null,
+            `Deleted request for vehicle ${request.vehicle_number} at station ${request.station_code}`
+        );
         
         await refreshDashboard();
         
@@ -452,9 +607,6 @@ async function deleteRequest(requestId) {
     }
 }
 
-/**
- * Create new vehicle
- */
 async function createVehicle() {
     const vehicleType = document.getElementById('newVehicleType').value;
     const vehicleNumber = document.getElementById('newVehicleNumber').value.trim();
@@ -465,7 +617,6 @@ async function createVehicle() {
     }
     
     try {
-        // Insert vehicle
         const { data: vehicleData, error: vehicleError } = await supabase
             .from('vehicles')
             .insert([{ vehicle_type: vehicleType, vehicle_number: vehicleNumber }])
@@ -473,7 +624,6 @@ async function createVehicle() {
         
         if (vehicleError) throw vehicleError;
         
-        // Create production status for all stations
         const stations = STATIONS[vehicleType];
         const statusRecords = stations.map(station => ({
             vehicle_number: vehicleNumber,
@@ -487,13 +637,20 @@ async function createVehicle() {
         
         if (statusError) throw statusError;
         
+        await logAudit(
+            'create',
+            'vehicle',
+            vehicleData[0].id,
+            null,
+            { vehicle_type: vehicleType, vehicle_number: vehicleNumber, stations: stations.length },
+            `Created new vehicle ${vehicleNumber} (${vehicleType}) with ${stations.length} stations`
+        );
+        
         showSuccess('vehicleSuccess', 'Vehicle added successfully!');
         
-        // Reset form
         document.getElementById('newVehicleType').value = '';
         document.getElementById('newVehicleNumber').value = '';
         
-        // Refresh data
         await refreshDashboard();
         
     } catch (err) {
@@ -506,11 +663,12 @@ async function createVehicle() {
     }
 }
 
-/**
- * Update production status
- */
 async function updateProductionStatus(vehicleNumber, stationCode, newStatus) {
     try {
+        const oldStatus = allProductionStatus.find(
+            s => s.vehicle_number === vehicleNumber && s.station_code === stationCode
+        );
+        
         const { data, error } = await supabase
             .from('production_status')
             .update({ status: newStatus, updated_at: new Date().toISOString() })
@@ -520,7 +678,27 @@ async function updateProductionStatus(vehicleNumber, stationCode, newStatus) {
         
         if (error) throw error;
         
+        await logAudit(
+            'update',
+            'production_status',
+            data[0].id,
+            { status: oldStatus.status },
+            { status: newStatus },
+            `Updated production status for ${vehicleNumber} station ${stationCode} from ${oldStatus.status} to ${newStatus}`
+        );
+        
         await refreshDashboard();
+        
+        // Reapply filters after refresh
+        if (currentProductionFilters.vehicle || currentProductionFilters.status) {
+            const vehicleSelect = document.getElementById('filterProdVehicle');
+            const statusSelect = document.getElementById('filterProdStatus');
+            
+            if (vehicleSelect) vehicleSelect.value = currentProductionFilters.vehicle;
+            if (statusSelect) statusSelect.value = currentProductionFilters.status;
+            
+            applyProductionFilters();
+        }
         
     } catch (err) {
         console.error('Error updating production status:', err);
@@ -528,11 +706,6 @@ async function updateProductionStatus(vehicleNumber, stationCode, newStatus) {
     }
 }
 
-// ==================== USER MANAGEMENT (Master Admin Only) ====================
-
-/**
- * Create new user
- */
 async function createUser() {
     const username = document.getElementById('newUsername').value.trim();
     const password = document.getElementById('newPassword').value.trim();
@@ -549,10 +722,8 @@ async function createUser() {
     }
     
     try {
-        // Hash password
         const passwordHash = await hashPassword(password);
         
-        // Insert user
         const { data, error } = await supabase
             .from('users')
             .insert([{
@@ -564,15 +735,22 @@ async function createUser() {
         
         if (error) throw error;
         
+        await logAudit(
+            'create',
+            'user',
+            data[0].id,
+            null,
+            { username, role },
+            `Created new user: ${username} with role: ${role}`
+        );
+        
         showSuccess('userSuccess', 'User created successfully!');
         
-        // Reset form
         document.getElementById('newUsername').value = '';
         document.getElementById('newPassword').value = '';
         document.getElementById('newUserRole').value = '';
         document.getElementById('addUserForm').style.display = 'none';
         
-        // Refresh users table
         await fetchUsers();
         renderUsersTable();
         
@@ -586,19 +764,27 @@ async function createUser() {
     }
 }
 
-/**
- * Delete user
- */
 async function deleteUser(userId) {
     if (!confirm('Are you sure you want to delete this user?')) return;
     
     try {
+        const user = allUsers.find(u => u.id === userId);
+        
         const { error } = await supabase
             .from('users')
             .delete()
             .eq('id', userId);
         
         if (error) throw error;
+        
+        await logAudit(
+            'delete',
+            'user',
+            userId,
+            { username: user.username, role: user.role },
+            null,
+            `Deleted user: ${user.username}`
+        );
         
         await fetchUsers();
         renderUsersTable();
@@ -609,9 +795,6 @@ async function deleteUser(userId) {
     }
 }
 
-/**
- * Reset user password
- */
 async function resetUserPassword(userId) {
     const newPassword = prompt('Enter new password (min 6 characters):');
     
@@ -621,6 +804,7 @@ async function resetUserPassword(userId) {
     }
     
     try {
+        const user = allUsers.find(u => u.id === userId);
         const passwordHash = await hashPassword(newPassword);
         
         const { error } = await supabase
@@ -629,6 +813,15 @@ async function resetUserPassword(userId) {
             .eq('id', userId);
         
         if (error) throw error;
+        
+        await logAudit(
+            'update',
+            'user',
+            userId,
+            null,
+            { action: 'password_reset' },
+            `Reset password for user: ${user.username}`
+        );
         
         alert('Password updated successfully!');
         
@@ -640,9 +833,6 @@ async function resetUserPassword(userId) {
 
 // ==================== RENDERING FUNCTIONS ====================
 
-/**
- * Render requests table (ID column removed)
- */
 function renderRequestsTable(requests = allRequests) {
     const tbody = document.getElementById('requestsTableBody');
     if (!tbody) return;
@@ -684,9 +874,6 @@ function renderRequestsTable(requests = allRequests) {
     });
 }
 
-/**
- * Render production status table
- */
 function renderProductionTable(statusData = allProductionStatus) {
     const tbody = document.getElementById('productionTableBody');
     if (!tbody) return;
@@ -722,9 +909,6 @@ function renderProductionTable(statusData = allProductionStatus) {
     });
 }
 
-/**
- * Render vehicles table with progress
- */
 function renderVehiclesTable(vehicles = allVehicles) {
     const tbody = document.getElementById('vehiclesTableBody');
     if (!tbody) return;
@@ -737,7 +921,6 @@ function renderVehiclesTable(vehicles = allVehicles) {
     }
     
     vehicles.forEach(vehicle => {
-        // Get production status for this vehicle
         const vehicleStatus = allProductionStatus.filter(s => s.vehicle_number === vehicle.vehicle_number);
         const totalStations = vehicleStatus.length;
         const completed = vehicleStatus.filter(s => s.status === 'completed').length;
@@ -767,9 +950,6 @@ function renderVehiclesTable(vehicles = allVehicles) {
     });
 }
 
-/**
- * Render users table (master_admin only)
- */
 function renderUsersTable() {
     const tbody = document.getElementById('usersTableBody');
     if (!tbody) return;
@@ -804,29 +984,22 @@ function renderUsersTable() {
     });
 }
 
-/**
- * Update summary cards
- */
 function updateSummaryCards() {
-    // Total vehicles
     const totalVehicles = document.getElementById('totalVehicles');
     if (totalVehicles) totalVehicles.textContent = allVehicles.length;
     
-    // Completed stations
     const completedStations = document.getElementById('completedStations');
     if (completedStations) {
         const completed = allProductionStatus.filter(s => s.status === 'completed').length;
         completedStations.textContent = completed;
     }
     
-    // Pending stations
     const pendingStations = document.getElementById('pendingStations');
     if (pendingStations) {
         const pending = allProductionStatus.filter(s => s.status === 'pending').length;
         pendingStations.textContent = pending;
     }
     
-    // Open requests
     const openRequests = document.getElementById('openRequests');
     if (openRequests) {
         const open = allRequests.filter(r => r.status === 'open').length;
@@ -834,9 +1007,336 @@ function updateSummaryCards() {
     }
 }
 
+// ==================== AUDIT LOG MODAL FUNCTIONS ====================
+
 /**
- * Show vehicles detail modal
+ * Show audit logs modal (triggered from navbar button)
  */
+async function showAuditLogsModal() {
+    await fetchAuditLogs();
+    
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'auditLogsModal';
+    modal.innerHTML = `
+        <div class="modal-content" style="max-width: 1200px;">
+            <div class="modal-header">
+                <h3>📋 Audit Logs (${allAuditLogs.length} entries)</h3>
+                <button class="btn-icon close-modal" onclick="closeModal(); event.stopPropagation();">&times;</button>
+            </div>
+            <div class="modal-body">
+                <!-- Filters -->
+                <div class="filters" style="margin-bottom: 20px;">
+                    <div class="filter-group">
+                        <label for="modalFilterUser">Username</label>
+                        <select id="modalFilterUser">
+                            <option value="">All Users</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="modalFilterDateFrom">Date From</label>
+                        <input type="date" id="modalFilterDateFrom">
+                    </div>
+                    <div class="filter-group">
+                        <label for="modalFilterDateTo">Date To</label>
+                        <input type="date" id="modalFilterDateTo">
+                    </div>
+                    <div class="filter-group">
+                        <label for="modalFilterAction">Action Type</label>
+                        <select id="modalFilterAction">
+                            <option value="">All Actions</option>
+                            <option value="login">Login</option>
+                            <option value="create">Create</option>
+                            <option value="update">Update</option>
+                            <option value="delete">Delete</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="modalSearchAudit">Search</label>
+                        <input type="text" id="modalSearchAudit" placeholder="Search description...">
+                    </div>
+                </div>
+                
+                <!-- Action Buttons -->
+                <div class="modal-actions">
+                    <button class="btn btn-secondary" onclick="exportAuditLogsToExcel(); event.stopPropagation();">
+                        📊 Export to Excel
+                    </button>
+                    <button class="btn btn-secondary" onclick="applyAuditModalFilters(); event.stopPropagation();">
+                        🔍 Apply Filters
+                    </button>
+                    <button class="btn btn-secondary" onclick="clearAuditModalFilters(); event.stopPropagation();">
+                        🔄 Clear Filters
+                    </button>
+                </div>
+                
+                <!-- Table -->
+                <div class="table-scroll" style="max-height: 500px;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Timestamp</th>
+                                <th>User</th>
+                                <th>Action</th>
+                                <th>Entity</th>
+                                <th>Description</th>
+                                <th>IP</th>
+                                <th>Details</th>
+                            </tr>
+                        </thead>
+                        <tbody id="auditModalTableBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    document.body.appendChild(modal);
+    
+    // Populate user filter
+    populateAuditUserFilter();
+    
+    // Render initial table
+    renderAuditModalTable(allAuditLogs);
+    
+    // Setup event listeners
+    setupAuditModalListeners();
+    
+    // Modal close handlers
+    const modalContent = modal.querySelector('.modal-content');
+    modalContent.addEventListener('click', (e) => e.stopPropagation());
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) closeModal();
+    });
+    
+    // ESC key handler
+    const escHandler = (e) => {
+        if (e.key === 'Escape') {
+            closeModal();
+            document.removeEventListener('keydown', escHandler);
+        }
+    };
+    document.addEventListener('keydown', escHandler);
+}
+
+/**
+ * Populate user filter dropdown
+ */
+function populateAuditUserFilter() {
+    const select = document.getElementById('modalFilterUser');
+    if (!select) return;
+    
+    const uniqueUsers = [...new Set(allAuditLogs.map(log => log.username))].sort();
+    
+    select.innerHTML = '<option value="">All Users</option>';
+    uniqueUsers.forEach(username => {
+        const option = document.createElement('option');
+        option.value = username;
+        option.textContent = username;
+        select.appendChild(option);
+    });
+}
+
+/**
+ * Setup audit modal event listeners
+ */
+function setupAuditModalListeners() {
+    const filterUser = document.getElementById('modalFilterUser');
+    const filterDateFrom = document.getElementById('modalFilterDateFrom');
+    const filterDateTo = document.getElementById('modalFilterDateTo');
+    const filterAction = document.getElementById('modalFilterAction');
+    const searchInput = document.getElementById('modalSearchAudit');
+    
+    if (filterUser) filterUser.addEventListener('change', applyAuditModalFilters);
+    if (filterDateFrom) filterDateFrom.addEventListener('change', applyAuditModalFilters);
+    if (filterDateTo) filterDateTo.addEventListener('change', applyAuditModalFilters);
+    if (filterAction) filterAction.addEventListener('change', applyAuditModalFilters);
+    if (searchInput) searchInput.addEventListener('input', debounce(applyAuditModalFilters, 300));
+}
+
+/**
+ * Apply audit modal filters
+ */
+function applyAuditModalFilters() {
+    let filtered = [...allAuditLogs];
+    
+    const userFilter = document.getElementById('modalFilterUser')?.value;
+    if (userFilter) {
+        filtered = filtered.filter(log => log.username === userFilter);
+    }
+    
+    const dateFrom = document.getElementById('modalFilterDateFrom')?.value;
+    if (dateFrom) {
+        const fromDate = new Date(dateFrom);
+        filtered = filtered.filter(log => new Date(log.timestamp) >= fromDate);
+    }
+    
+    const dateTo = document.getElementById('modalFilterDateTo')?.value;
+    if (dateTo) {
+        const toDate = new Date(dateTo);
+        toDate.setHours(23, 59, 59, 999);
+        filtered = filtered.filter(log => new Date(log.timestamp) <= toDate);
+    }
+    
+    const actionFilter = document.getElementById('modalFilterAction')?.value;
+    if (actionFilter) {
+        filtered = filtered.filter(log => log.action_type === actionFilter);
+    }
+    
+    const searchTerm = document.getElementById('modalSearchAudit')?.value.toLowerCase();
+    if (searchTerm) {
+        filtered = filtered.filter(log => 
+            log.description.toLowerCase().includes(searchTerm) ||
+            log.username.toLowerCase().includes(searchTerm)
+        );
+    }
+    
+    renderAuditModalTable(filtered);
+}
+
+/**
+ * Clear audit modal filters
+ */
+function clearAuditModalFilters() {
+    document.getElementById('modalFilterUser').value = '';
+    document.getElementById('modalFilterDateFrom').value = '';
+    document.getElementById('modalFilterDateTo').value = '';
+    document.getElementById('modalFilterAction').value = '';
+    document.getElementById('modalSearchAudit').value = '';
+    
+    renderAuditModalTable(allAuditLogs);
+}
+
+/**
+ * Render audit modal table
+ */
+function renderAuditModalTable(logs) {
+    const tbody = document.getElementById('auditModalTableBody');
+    if (!tbody) return;
+    
+    tbody.innerHTML = '';
+    
+    if (logs.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center;">No audit logs found</td></tr>';
+        return;
+    }
+    
+    logs.forEach(log => {
+        const tr = document.createElement('tr');
+        
+        const actionClass = {
+            'login': 'badge-info',
+            'create': 'badge-completed',
+            'update': 'badge-in-progress',
+            'delete': 'badge-open'
+        };
+        
+        tr.innerHTML = `
+            <td>${formatDate(log.timestamp)}</td>
+            <td><strong>${log.username}</strong></td>
+            <td><span class="badge ${actionClass[log.action_type] || 'badge-station'}">${log.action_type}</span></td>
+            <td><span class="badge badge-station">${log.entity_type}</span></td>
+            <td>${log.description}</td>
+            <td>${log.ip_address || '-'}</td>
+            <td>
+                ${log.new_values || log.old_values ? `<button class="btn-icon" onclick="showAuditDetailsInModal('${log.id}'); event.stopPropagation();" title="View Details">👁️</button>` : '-'}
+            </td>
+        `;
+        
+        tbody.appendChild(tr);
+    });
+    
+    // Update count in header
+    const header = document.querySelector('#auditLogsModal .modal-header h3');
+    if (header) {
+        header.textContent = `📋 Audit Logs (${logs.length} ${logs.length === allAuditLogs.length ? 'total' : 'filtered'})`;
+    }
+}
+
+/**
+ * Show audit details in a nested modal
+ */
+function showAuditDetailsInModal(logId) {
+    const log = allAuditLogs.find(l => l.id === logId);
+    if (!log) return;
+    
+    let detailsHTML = '<div style="padding: 20px;">';
+    detailsHTML += `<h4>Audit Log Details</h4>`;
+    detailsHTML += `<p><strong>Time:</strong> ${formatDate(log.timestamp)}</p>`;
+    detailsHTML += `<p><strong>User:</strong> ${log.username} (${log.user_role || 'N/A'})</p>`;
+    detailsHTML += `<p><strong>Action:</strong> ${log.action_type}</p>`;
+    detailsHTML += `<p><strong>Entity:</strong> ${log.entity_type}</p>`;
+    detailsHTML += `<p><strong>Description:</strong> ${log.description}</p>`;
+    detailsHTML += `<p><strong>IP Address:</strong> ${log.ip_address || 'Unknown'}</p>`;
+    
+    if (log.old_values) {
+        detailsHTML += `<p><strong>Old Values:</strong></p>`;
+        detailsHTML += `<pre style="background: #f5f5f5; padding: 10px; border-radius: 5px; overflow-x: auto; max-height: 200px;">${JSON.stringify(JSON.parse(log.old_values), null, 2)}</pre>`;
+    }
+    
+    if (log.new_values) {
+        detailsHTML += `<p><strong>New Values:</strong></p>`;
+        detailsHTML += `<pre style="background: #f5f5f5; padding: 10px; border-radius: 5px; overflow-x: auto; max-height: 200px;">${JSON.stringify(JSON.parse(log.new_values), null, 2)}</pre>`;
+    }
+    
+    detailsHTML += '</div>';
+    
+    const detailModal = document.createElement('div');
+    detailModal.className = 'modal-overlay';
+    detailModal.style.zIndex = '10001';
+    detailModal.innerHTML = `
+        <div class="modal-content" style="max-width: 700px;">
+            <div class="modal-header">
+                <h3>Audit Log Details</h3>
+                <button class="btn-icon close-modal" onclick="this.closest('.modal-overlay').remove(); event.stopPropagation();">&times;</button>
+            </div>
+            <div class="modal-body" style="max-height: 600px; overflow-y: auto;">
+                ${detailsHTML}
+            </div>
+        </div>
+    `;
+    
+    document.body.appendChild(detailModal);
+    
+    const modalContent = detailModal.querySelector('.modal-content');
+    modalContent.addEventListener('click', (e) => e.stopPropagation());
+    detailModal.addEventListener('click', (e) => {
+        if (e.target === detailModal) {
+            detailModal.remove();
+        }
+    });
+}
+
+/**
+ * Export audit logs to Excel
+ */
+function exportAuditLogsToExcel() {
+    try {
+        const wb = XLSX.utils.book_new();
+        
+        const auditData = allAuditLogs.map(log => ({
+            'Timestamp': formatDate(log.timestamp),
+            'Username': log.username,
+            'Role': log.user_role || '',
+            'Action': log.action_type,
+            'Entity': log.entity_type,
+            'Description': log.description,
+            'IP Address': log.ip_address || ''
+        }));
+        
+        const ws = XLSX.utils.json_to_sheet(auditData);
+        XLSX.utils.book_append_sheet(wb, ws, 'Audit Logs');
+        
+        XLSX.writeFile(wb, `audit-logs-${new Date().toISOString().split('T')[0]}.xlsx`);
+        
+    } catch (error) {
+        console.error('Error exporting audit logs:', error);
+        alert('Failed to export audit logs');
+    }
+}
+
+// ==================== SUMMARY CARD FUNCTIONS ====================
+
 function showVehiclesDetail() {
     const data = allVehicles.map(v => {
         const status = allProductionStatus.filter(s => s.vehicle_number === v.vehicle_number);
@@ -855,9 +1355,6 @@ function showVehiclesDetail() {
     showDataModal('Total Vehicles', data, 'vehicles');
 }
 
-/**
- * Show completed stations detail modal
- */
 function showCompletedStationsDetail() {
     const completedStations = allProductionStatus.filter(s => s.status === 'completed');
     const data = completedStations.map(s => ({
@@ -870,9 +1367,6 @@ function showCompletedStationsDetail() {
     showDataModal('Completed Stations', data, 'completed-stations');
 }
 
-/**
- * Show pending stations detail modal
- */
 function showPendingStationsDetail() {
     const pendingStations = allProductionStatus.filter(s => s.status === 'pending');
     const data = pendingStations.map(s => ({
@@ -885,9 +1379,6 @@ function showPendingStationsDetail() {
     showDataModal('Pending Stations', data, 'pending-stations');
 }
 
-/**
- * Show open requests detail modal
- */
 function showOpenRequestsDetail() {
     const openRequests = allRequests.filter(r => r.status === 'open');
     const data = openRequests.map(r => ({
@@ -904,11 +1395,7 @@ function showOpenRequestsDetail() {
     showDataModal('Open Requests', data, 'open-requests');
 }
 
-/**
- * Generic function to show data modal
- */
 function showDataModal(title, data, type) {
-    // Close any existing modal first
     closeModal();
     
     if (data.length === 0) {
@@ -916,7 +1403,6 @@ function showDataModal(title, data, type) {
         return;
     }
     
-    // Create modal HTML
     const modal = document.createElement('div');
     modal.className = 'modal-overlay';
     modal.innerHTML = `
@@ -956,20 +1442,15 @@ function showDataModal(title, data, type) {
     
     document.body.appendChild(modal);
     
-    // Prevent clicks inside modal content from closing it
     const modalContent = modal.querySelector('.modal-content');
-    modalContent.addEventListener('click', (e) => {
-        e.stopPropagation();
-    });
+    modalContent.addEventListener('click', (e) => e.stopPropagation());
     
-    // Close on overlay click
     modal.addEventListener('click', (e) => {
         if (e.target === modal) {
             closeModal();
         }
     });
     
-    // Close on ESC key
     const escHandler = (e) => {
         if (e.key === 'Escape') {
             closeModal();
@@ -979,17 +1460,11 @@ function showDataModal(title, data, type) {
     document.addEventListener('keydown', escHandler);
 }
 
-/**
- * Close modal
- */
 function closeModal() {
     const modals = document.querySelectorAll('.modal-overlay');
     modals.forEach(modal => modal.remove());
 }
 
-/**
- * Export card data to Excel
- */
 function exportCardData(type, data) {
     try {
         const wb = XLSX.utils.book_new();
@@ -1002,9 +1477,6 @@ function exportCardData(type, data) {
     }
 }
 
-/**
- * Export card data to PDF
- */
 function exportCardDataPDF(title, data) {
     try {
         const { jsPDF} = window.jspdf;
@@ -1036,9 +1508,6 @@ function exportCardDataPDF(title, data) {
     }
 }
 
-/**
- * Populate vehicle number dropdown based on vehicle type
- */
 function populateVehicleNumbers() {
     const vehicleType = document.getElementById('reqVehicleType').value;
     const vehicleNumberSelect = document.getElementById('reqVehicleNumber');
@@ -1059,9 +1528,6 @@ function populateVehicleNumbers() {
     });
 }
 
-/**
- * Populate station dropdown based on vehicle type
- */
 function populateStations() {
     const vehicleType = document.getElementById('reqVehicleType').value;
     const stationSelect = document.getElementById('reqStationCode');
@@ -1082,9 +1548,6 @@ function populateStations() {
     });
 }
 
-/**
- * Populate production status vehicle filter
- */
 function populateProductionVehicleFilter() {
     const filterSelect = document.getElementById('filterProdVehicle');
     if (!filterSelect) return;
@@ -1101,31 +1564,24 @@ function populateProductionVehicleFilter() {
 
 // ==================== FILTERING ====================
 
-/**
- * Apply filters to requests table (with fastener filter + stores filtered data)
- */
 function applyRequestFilters() {
     let filtered = [...allRequests];
     
-    // Status filter
     const statusFilter = document.getElementById('filterStatus').value;
     if (statusFilter) {
         filtered = filtered.filter(r => r.status === statusFilter);
     }
     
-    // Request type filter
     const typeFilter = document.getElementById('filterReqType').value;
     if (typeFilter) {
         filtered = filtered.filter(r => r.request_type === typeFilter);
     }
     
-    // Vehicle type filter
     const vehicleTypeFilter = document.getElementById('filterVehicleType').value;
     if (vehicleTypeFilter) {
         filtered = filtered.filter(r => r.vehicle_type === vehicleTypeFilter);
     }
     
-    // Fastener filter (NEW)
     const fastenerFilter = document.getElementById('filterFastener')?.value;
     if (fastenerFilter) {
         if (fastenerFilter === 'yes') {
@@ -1135,7 +1591,6 @@ function applyRequestFilters() {
         }
     }
     
-    // Search filter
     const searchTerm = document.getElementById('searchRequest').value.toLowerCase();
     if (searchTerm) {
         filtered = filtered.filter(r => 
@@ -1145,26 +1600,25 @@ function applyRequestFilters() {
         );
     }
     
-    // Store filtered results for PDF export
     filteredRequests = filtered;
     
     renderRequestsTable(filtered);
 }
 
-/**
- * Apply filters to production status table
- */
 function applyProductionFilters() {
     let filtered = [...allProductionStatus];
     
-    // Vehicle filter
     const vehicleFilter = document.getElementById('filterProdVehicle').value;
+    const statusFilter = document.getElementById('filterProdStatus').value;
+    
+    // Store filter state
+    currentProductionFilters.vehicle = vehicleFilter;
+    currentProductionFilters.status = statusFilter;
+    
     if (vehicleFilter) {
         filtered = filtered.filter(s => s.vehicle_number === vehicleFilter);
     }
     
-    // Status filter
-    const statusFilter = document.getElementById('filterProdStatus').value;
     if (statusFilter) {
         filtered = filtered.filter(s => s.status === statusFilter);
     }
@@ -1172,13 +1626,9 @@ function applyProductionFilters() {
     renderProductionTable(filtered);
 }
 
-/**
- * Apply filters to vehicles table
- */
 function applyVehicleFilters() {
     let filtered = [...allVehicles];
     
-    // Vehicle type filter
     const typeFilter = document.getElementById('filterVehicles').value;
     if (typeFilter) {
         filtered = filtered.filter(v => v.vehicle_type === typeFilter);
@@ -1189,9 +1639,6 @@ function applyVehicleFilters() {
 
 // ==================== ANALYTICS & CHARTS ====================
 
-/**
- * Generate all analytics charts
- */
 function generateCharts() {
     generateProductionByTypeChart();
     generateRequestStatusChart();
@@ -1199,21 +1646,16 @@ function generateCharts() {
     generateRequestTypeChart();
 }
 
-/**
- * Production status by vehicle type chart
- */
 function generateProductionByTypeChart() {
     const canvas = document.getElementById('productionByTypeChart');
     if (!canvas) return;
     
-    // Destroy existing chart
     if (chartInstances.productionByType) {
         chartInstances.productionByType.destroy();
     }
     
     const ctx = canvas.getContext('2d');
     
-    // Calculate data
     const types = ['K9', 'K10', 'K11'];
     const completedData = [];
     const pendingData = [];
@@ -1262,9 +1704,6 @@ function generateProductionByTypeChart() {
     });
 }
 
-/**
- * Request status distribution chart
- */
 function generateRequestStatusChart() {
     const canvas = document.getElementById('requestStatusChart');
     if (!canvas) return;
@@ -1294,9 +1733,6 @@ function generateRequestStatusChart() {
     });
 }
 
-/**
- * Request timeline chart (last 30 days)
- */
 function generateRequestTimelineChart() {
     const canvas = document.getElementById('requestTimelineChart');
     if (!canvas) return;
@@ -1307,7 +1743,6 @@ function generateRequestTimelineChart() {
     
     const ctx = canvas.getContext('2d');
     
-    // Get last 30 days
     const days = [];
     const openCounts = [];
     const deliveredCounts = [];
@@ -1358,9 +1793,6 @@ function generateRequestTimelineChart() {
     });
 }
 
-/**
- * Request type breakdown chart
- */
 function generateRequestTypeChart() {
     const canvas = document.getElementById('requestTypeChart');
     if (!canvas) return;
@@ -1393,27 +1825,20 @@ function generateRequestTypeChart() {
 
 // ==================== EXPORT FUNCTIONS ====================
 
-/**
- * Export requests to PDF (uses filtered data)
- */
 function exportRequestsToPDF() {
     try {
         const { jsPDF } = window.jspdf;
         const doc = new jsPDF();
         
-        // Use filtered data if filters are applied, otherwise use all
         const dataToExport = filteredRequests.length > 0 ? filteredRequests : allRequests;
         
-        // Title
         doc.setFontSize(18);
         doc.text('Assembly Production - Requests Report', 14, 20);
         
-        // Metadata
         doc.setFontSize(10);
         doc.text(`Generated: ${new Date().toLocaleString()}`, 14, 28);
         doc.text(`By: ${currentUser.username}`, 14, 34);
         
-        // Get current filter values
         const filterStatus = document.getElementById('filterStatus').value || 'All';
         const filterType = document.getElementById('filterReqType').value || 'All';
         const filterVehicle = document.getElementById('filterVehicleType').value || 'All';
@@ -1422,7 +1847,6 @@ function exportRequestsToPDF() {
         doc.text(`Filters: Status=${filterStatus}, Type=${filterType}, Vehicle=${filterVehicle}, Fastener=${filterFastener}`, 14, 40);
         doc.text(`Total Records: ${dataToExport.length}`, 14, 46);
         
-        // Prepare table data (without ID column)
         const tableData = dataToExport.map(r => [
             r.vehicle_number,
             r.station_code,
@@ -1435,7 +1859,6 @@ function exportRequestsToPDF() {
             formatDate(r.request_date)
         ]);
         
-        // Add table (without ID column)
         doc.autoTable({
             startY: 52,
             head: [['Vehicle', 'Station', 'Type', 'Part #', 'Qty', 'Fastener', 'Status', 'By', 'Date']],
@@ -1444,7 +1867,6 @@ function exportRequestsToPDF() {
             headStyles: { fillColor: [0, 168, 255] }
         });
         
-        // Save
         doc.save(`requests-report-${new Date().toISOString().split('T')[0]}.pdf`);
         
     } catch (error) {
@@ -1453,14 +1875,10 @@ function exportRequestsToPDF() {
     }
 }
 
-/**
- * Export requests to Excel
- */
 function exportRequestsToExcel() {
     try {
         const wb = XLSX.utils.book_new();
         
-        // Requests sheet
         const requestsData = allRequests.map(r => ({
             'Vehicle Number': r.vehicle_number,
             'Vehicle Type': r.vehicle_type,
@@ -1478,7 +1896,6 @@ function exportRequestsToExcel() {
         const ws1 = XLSX.utils.json_to_sheet(requestsData);
         XLSX.utils.book_append_sheet(wb, ws1, 'Requests');
         
-        // Vehicles sheet
         const vehiclesData = allVehicles.map(v => {
             const status = allProductionStatus.filter(s => s.vehicle_number === v.vehicle_number);
             const completed = status.filter(s => s.status === 'completed').length;
@@ -1497,7 +1914,6 @@ function exportRequestsToExcel() {
         const ws2 = XLSX.utils.json_to_sheet(vehiclesData);
         XLSX.utils.book_append_sheet(wb, ws2, 'Vehicles');
         
-        // Production Status sheet
         const prodData = allProductionStatus.map(s => ({
             'Vehicle Number': s.vehicle_number,
             'Station': s.station_code,
@@ -1508,7 +1924,6 @@ function exportRequestsToExcel() {
         const ws3 = XLSX.utils.json_to_sheet(prodData);
         XLSX.utils.book_append_sheet(wb, ws3, 'Production Status');
         
-        // Save
         XLSX.writeFile(wb, `production-data-${new Date().toISOString().split('T')[0]}.xlsx`);
         
     } catch (error) {
@@ -1517,24 +1932,18 @@ function exportRequestsToExcel() {
     }
 }
 
-/**
- * Export analytics to PDF
- */
 function exportAnalyticsToPDF() {
     try {
         const { jsPDF } = window.jspdf;
         const doc = new jsPDF();
         
-        // Title
         doc.setFontSize(20);
         doc.text('Assembly Production Analytics Report', 14, 20);
         
-        // Metadata
         doc.setFontSize(10);
         doc.text(`Generated: ${new Date().toLocaleString()}`, 14, 30);
         doc.text(`By: ${currentUser.username}`, 14, 36);
         
-        // Summary statistics
         doc.setFontSize(14);
         doc.text('Summary Statistics', 14, 46);
         
@@ -1553,7 +1962,6 @@ function exportAnalyticsToPDF() {
             yPos += 6;
         });
         
-        // Vehicle breakdown
         yPos += 8;
         doc.setFontSize(14);
         doc.text('Vehicle Breakdown', 14, yPos);
@@ -1587,7 +1995,6 @@ function exportAnalyticsToPDF() {
             headStyles: { fillColor: [0, 168, 255] }
         });
         
-        // Request breakdown
         yPos = doc.lastAutoTable.finalY + 12;
         doc.setFontSize(14);
         doc.text('Request Statistics', 14, yPos);
@@ -1609,7 +2016,6 @@ function exportAnalyticsToPDF() {
             headStyles: { fillColor: [0, 168, 255] }
         });
         
-        // Add page numbers
         const pageCount = doc.internal.getNumberOfPages();
         for (let i = 1; i <= pageCount; i++) {
             doc.setPage(i);
@@ -1617,7 +2023,6 @@ function exportAnalyticsToPDF() {
             doc.text(`Page ${i} of ${pageCount}`, doc.internal.pageSize.getWidth() - 30, doc.internal.pageSize.getHeight() - 10);
         }
         
-        // Save
         doc.save(`analytics-report-${new Date().toISOString().split('T')[0]}.pdf`);
         
     } catch (error) {
@@ -1628,33 +2033,25 @@ function exportAnalyticsToPDF() {
 
 // ==================== TAB SWITCHING ====================
 
-/**
- * Switch between tabs
- */
 function switchTab(tabName) {
-    // Hide all tab contents
     document.querySelectorAll('.tab-content').forEach(tab => {
         tab.classList.remove('active');
     });
     
-    // Remove active class from all tab buttons
     document.querySelectorAll('.tab-btn').forEach(btn => {
         btn.classList.remove('active');
     });
     
-    // Show selected tab content
     const selectedTab = document.getElementById(`${tabName}Tab`);
     if (selectedTab) {
         selectedTab.classList.add('active');
     }
     
-    // Add active class to clicked button
     const selectedBtn = document.querySelector(`[data-tab="${tabName}"]`);
     if (selectedBtn) {
         selectedBtn.classList.add('active');
     }
     
-    // If analytics tab, generate charts
     if (tabName === 'analytics') {
         setTimeout(generateCharts, 100);
     }
@@ -1662,11 +2059,7 @@ function switchTab(tabName) {
 
 // ==================== EVENT LISTENERS ====================
 
-/**
- * Setup all event listeners
- */
 function setupEventListeners() {
-    // Login form
     const loginForm = document.getElementById('loginForm');
     if (loginForm) {
         loginForm.addEventListener('submit', (e) => {
@@ -1675,20 +2068,17 @@ function setupEventListeners() {
         });
     }
     
-    // Logout button
     const logoutBtn = document.getElementById('logoutBtn');
     if (logoutBtn) {
         logoutBtn.addEventListener('click', logout);
     }
     
-    // Tab switching
     document.querySelectorAll('.tab-btn').forEach(btn => {
         btn.addEventListener('click', () => {
             switchTab(btn.dataset.tab);
         });
     });
     
-    // Request form - vehicle type change
     const reqVehicleType = document.getElementById('reqVehicleType');
     if (reqVehicleType) {
         reqVehicleType.addEventListener('change', () => {
@@ -1697,7 +2087,6 @@ function setupEventListeners() {
         });
     }
     
-    // Request form - request type change
     const reqType = document.getElementById('reqType');
     if (reqType) {
         reqType.addEventListener('change', (e) => {
@@ -1708,19 +2097,16 @@ function setupEventListeners() {
         });
     }
     
-    // Create request button
     const createRequestBtn = document.getElementById('createRequestBtn');
     if (createRequestBtn) {
         createRequestBtn.addEventListener('click', createRequest);
     }
     
-    // Create vehicle button
     const addVehicleBtn = document.getElementById('addVehicleBtn');
     if (addVehicleBtn) {
         addVehicleBtn.addEventListener('click', createVehicle);
     }
     
-    // Request filters
     const filterStatus = document.getElementById('filterStatus');
     const filterReqType = document.getElementById('filterReqType');
     const filterVehicleType = document.getElementById('filterVehicleType');
@@ -1733,7 +2119,6 @@ function setupEventListeners() {
     if (filterFastener) filterFastener.addEventListener('change', applyRequestFilters);
     if (searchRequest) searchRequest.addEventListener('input', debounce(applyRequestFilters, 300));
     
-    // Summary cards click handlers
     const totalVehiclesCard = document.getElementById('totalVehicles')?.parentElement?.parentElement;
     const completedStationsCard = document.getElementById('completedStations')?.parentElement?.parentElement;
     const pendingStationsCard = document.getElementById('pendingStations')?.parentElement?.parentElement;
@@ -1772,18 +2157,15 @@ function setupEventListeners() {
         openRequestsCard.dataset.listenerAttached = 'true';
     }
     
-    // Production filters
     const filterProdVehicle = document.getElementById('filterProdVehicle');
     const filterProdStatus = document.getElementById('filterProdStatus');
     
     if (filterProdVehicle) filterProdVehicle.addEventListener('change', applyProductionFilters);
     if (filterProdStatus) filterProdStatus.addEventListener('change', applyProductionFilters);
     
-    // Vehicle filter
     const filterVehicles = document.getElementById('filterVehicles');
     if (filterVehicles) filterVehicles.addEventListener('change', applyVehicleFilters);
     
-    // Export buttons
     const exportRequestsPDF = document.getElementById('exportRequestsPDF');
     const exportRequestsExcel = document.getElementById('exportRequestsExcel');
     const exportAnalyticsPDF = document.getElementById('exportAnalyticsPDF');
@@ -1792,7 +2174,6 @@ function setupEventListeners() {
     if (exportRequestsExcel) exportRequestsExcel.addEventListener('click', exportRequestsToExcel);
     if (exportAnalyticsPDF) exportAnalyticsPDF.addEventListener('click', exportAnalyticsToPDF);
     
-    // User management buttons
     const showAddUserBtn = document.getElementById('showAddUserBtn');
     const addUserBtn = document.getElementById('addUserBtn');
     const cancelAddUserBtn = document.getElementById('cancelAddUserBtn');
@@ -1818,12 +2199,8 @@ function setupEventListeners() {
 
 // ==================== INITIALIZATION ====================
 
-/**
- * Refresh all dashboard data
- */
 async function refreshDashboard() {
     try {
-        // Fetch all data
         await Promise.all([
             fetchRequests(),
             fetchVehicles(),
@@ -1831,7 +2208,6 @@ async function refreshDashboard() {
             currentUser.role === 'master_admin' ? fetchUsers() : Promise.resolve()
         ]);
         
-        // Update UI
         updateSummaryCards();
         renderRequestsTable();
         renderProductionTable();
@@ -1842,7 +2218,6 @@ async function refreshDashboard() {
             renderUsersTable();
         }
         
-        // Re-apply filters
         applyRequestFilters();
         applyProductionFilters();
         applyVehicleFilters();
@@ -1852,23 +2227,18 @@ async function refreshDashboard() {
     }
 }
 
-/**
- * Initialize dashboard
- */
 async function initDashboard() {
     if (!checkAuth()) return;
     
     try {
-        // Show loading indicator (could add spinner here)
         console.log('Loading dashboard...');
         
-        // Fetch all initial data
+        await fetchTelegramConfig();
+        
         await refreshDashboard();
         
-        // Setup event listeners
         setupEventListeners();
         
-        // Generate charts if on analytics tab
         const analyticsTab = document.getElementById('analyticsTab');
         if (analyticsTab && analyticsTab.classList.contains('active')) {
             generateCharts();
@@ -1882,17 +2252,11 @@ async function initDashboard() {
     }
 }
 
-/**
- * Initialize login page
- */
 function initLogin() {
-    // Check if already logged in
     if (checkAuth()) return;
     
-    // Setup login form
     setupEventListeners();
     
-    // Focus on username field
     const usernameField = document.getElementById('username');
     if (usernameField) {
         usernameField.focus();
@@ -1901,11 +2265,7 @@ function initLogin() {
 
 // ==================== PAGE LOAD ====================
 
-/**
- * Run on DOM content loaded
- */
 document.addEventListener('DOMContentLoaded', () => {
-    // Check which page we're on
     if (window.location.pathname.includes('login.html')) {
         initLogin();
     } else if (window.location.pathname.includes('index.html') || window.location.pathname.endsWith('/')) {
@@ -1920,4 +2280,4 @@ window.addEventListener('unhandledrejection', (event) => {
 });
 
 // ==================== END OF APP.JS ====================
-console.log('Assembly Production System - Application loaded');
+console.log('Assembly Production System v2.0 - Application loaded with Audit Logging & Telegram Integration');

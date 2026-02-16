@@ -5,9 +5,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Assembly Production Monitoring System - Dashboard">
-    <meta name="author" content="Adham Morsy">
+    <meta name="author" content="Production Engineering Team">
     <title>Assembly Production Dashboard</title>
-    <link rel="icon" type="image/png" sizes="32x32" href="assets/img/logo1_circle_background.png">
     <link rel="stylesheet" href="assets/styles/style.css">
 </head>
 
@@ -18,7 +17,7 @@
             <img src="assets/img/logo1.png" alt="Company Logo" class="header-logo" onerror="this.style.display='none'">
             <div class="header-title">
                 <h1>Assembly Production System</h1>
-                <p class="muted">Monitoring & Analytics Dashboard © 2026 Adham Morsy | Version 1.0.0</p>
+                <p class="muted">Monitoring & Analytics Dashboard © 2026 Adham Morsy | Version 2.0.0</p>
             </div>
         </div>
         <div class="header-right">
@@ -26,6 +25,9 @@
                 <div class="user-badge" id="userEmail">User</div>
                 <div class="user-badge role-badge" id="userRole">Role</div>
             </div>
+            <button id="auditLogsBtn" class="btn btn-secondary" style="display: none;" onclick="showAuditLogsModal()">
+                📋 Audit Logs
+            </button>
             <button id="logoutBtn" class="btn btn-logout">Logout</button>
         </div>
     </header>
@@ -406,7 +408,7 @@
 
     <!-- FOOTER -->
     <footer>
-        <p>&copy; 2026 Adham Morsy | Version 1.0.0</p>
+        <p>&copy; 2026 Adham Morsy | Version 2.0.0</p>
     </footer>
 
     <!-- CDN LIBRARIES -->
