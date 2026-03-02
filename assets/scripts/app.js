@@ -437,53 +437,96 @@ async function createRequest() {
         return;
     }
 
-    const fastener = document.getElementById('reqFastener').checked; // UPDATE #2
-    const requestData = {
-        vehicle_type: vehicleType,
-        vehicle_number: vehicleNumber,
-        station_code: stationCode,
-        request_type: requestType,
-        status: 'open',
-        requested_by: currentUser.username,
-        fastener: fastener // UPDATE #2: Always include fastener
-    };
-
-    if (requestType === 'part') {
-        const partNumber = document.getElementById('reqPartNumber').value.trim();
-        const qty = parseInt(document.getElementById('reqQty').value);
-
-        if (!partNumber || !qty) {
-            showError('requestError', 'Part number and quantity are required for part requests');
-            return;
-        }
-
-        requestData.part_number = partNumber;
-        requestData.qty = qty;
-    }
+    const fastener = document.getElementById('reqFastener').checked;
+    const comments = document.getElementById('reqComments').value.trim();
 
     try {
-        const { data, error } = await supabase
-            .from('requests')
-            .insert([requestData])
-            .select();
+        if (requestType === 'part') {
+            // NEW: Get all parts from table
+            const parts = getPartsFromTable();
 
-        if (error) throw error;
+            if (parts.length === 0) {
+                showError('requestError', 'Please add at least one part with quantity');
+                return;
+            }
 
-        await logAudit('create', 'request', data[0].id, null, requestData,
-            `Created ${requestType} request for ${vehicleNumber} at station ${stationCode}`);
+            // Create multiple requests - one for each part
+            const requests = parts.map(part => ({
+                vehicle_type: vehicleType,
+                vehicle_number: vehicleNumber,
+                station_code: stationCode,
+                request_type: requestType,
+                status: 'open',
+                requested_by: currentUser.username,
+                fastener: fastener,
+                comments: comments || null,
+                part_number: part.part_number,
+                qty: part.qty
+            }));
 
-        showSuccess('requestSuccess', 'Request created successfully!');
+            const { data, error } = await supabase
+                .from('requests')
+                .insert(requests)
+                .select();
 
+            if (error) throw error;
+
+            // Log audit for multiple parts
+            await logAudit(
+                'create',
+                'request',
+                null,
+                null,
+                { count: parts.length, parts: parts },
+                `Created ${parts.length} part request(s) for ${vehicleNumber} at station ${stationCode}`
+            );
+
+            showSuccess('requestSuccess', `${parts.length} request(s) created successfully!`);
+
+        } else {
+            // Station request (single)
+            const requestData = {
+                vehicle_type: vehicleType,
+                vehicle_number: vehicleNumber,
+                station_code: stationCode,
+                request_type: requestType,
+                status: 'open',
+                requested_by: currentUser.username,
+                fastener: fastener,
+                comments: comments || null
+            };
+
+            const { data, error } = await supabase
+                .from('requests')
+                .insert([requestData])
+                .select();
+
+            if (error) throw error;
+
+            await logAudit(
+                'create',
+                'request',
+                data[0].id,
+                null,
+                requestData,
+                `Created ${requestType} request for ${vehicleNumber} at station ${stationCode}`
+            );
+
+            showSuccess('requestSuccess', 'Request created successfully!');
+        }
+
+        // Reset form
         document.getElementById('reqVehicleType').value = '';
         document.getElementById('reqVehicleNumber').value = '';
         document.getElementById('reqStationCode').value = '';
         document.getElementById('reqType').value = '';
-        document.getElementById('reqPartNumber').value = '';
-        document.getElementById('reqQty').value = '';
         document.getElementById('reqFastener').checked = false;
+        document.getElementById('reqComments').value = '';
         document.getElementById('partFields').style.display = 'none';
+        clearPartsTable();
 
         await refreshDashboard();
+
     } catch (err) {
         console.error('Error creating request:', err);
         showError('requestError', 'Failed to create request. Please try again.');
@@ -505,6 +548,36 @@ async function updateRequestStatus(requestId, newStatus) {
     } catch (err) {
         console.error('Error updating request status:', err);
         alert('Failed to update request status');
+    }
+}
+
+// NEW: Edit comments for existing request
+async function editRequestComments(requestId) {
+    try {
+        const request = allRequests.find(r => r.id === requestId);
+        if (!request) return;
+
+        const newComments = prompt('Edit Comments:', request.comments || '');
+        if (newComments === null) return; // User cancelled
+
+        const { data, error } = await supabase
+            .from('requests')
+            .update({ comments: newComments || null })
+            .eq('id', requestId)
+            .select();
+
+        if (error) throw error;
+
+        await logAudit('update', 'request', requestId,
+            { comments: request.comments },
+            { comments: newComments },
+            `Updated comments for request ${request.vehicle_number} - ${request.station_code}`
+        );
+
+        await refreshDashboard();
+    } catch (err) {
+        console.error('Error updating comments:', err);
+        alert('Failed to update comments');
     }
 }
 
@@ -873,6 +946,11 @@ function renderRequestsTable(requests = allRequests) {
         const tr = document.createElement('tr');
         const location = request.part_number ? getPartLocations(request.part_number) : '-'; // UPDATE #7
 
+        // Format comments for display
+        const commentsDisplay = request.comments
+            ? `<span title="${request.comments}" style="cursor: help;">${request.comments.substring(0, 30)}${request.comments.length > 30 ? '...' : ''}</span>`
+            : '-';
+
         tr.innerHTML = `
             <td>${request.vehicle_number}</td>
             <td>${request.station_code}</td>
@@ -885,9 +963,11 @@ function renderRequestsTable(requests = allRequests) {
             <td>${request.requested_by}</td>
             <td>${formatDate(request.request_date)}</td>
             <td>${formatDate(request.delivery_date)}</td>
-            <td class="actions-cell" ${['master_admin', 'admin'].includes(currentUser.role) ? '' : 'style="display:none;"'}>
+            <td>${commentsDisplay}</td>
+            <td class="actions-cell" ${['master_admin', 'admin', 'customer'].includes(currentUser.role) ? '' : 'style="display:none;"'}>
                 ${request.status === 'open' ? `<button class="btn-icon" onclick="updateRequestStatus('${request.id}', 'delivered')" title="Mark as Delivered">✓</button>` : ''}
-                <button class="btn-icon delete" onclick="deleteRequest('${request.id}')" title="Delete Request">🗑️</button>
+                ${['master_admin', 'admin', 'customer'].includes(currentUser.role) ? `<button class="btn-icon" onclick="editRequestComments('${request.id}')" title="Edit Comments">💬</button>` : ''}
+                ${['master_admin', 'admin'].includes(currentUser.role) ? `<button class="btn-icon delete" onclick="deleteRequest('${request.id}')" title="Delete Request">🗑️</button>` : ''}
             </td>
         `;
         tbody.appendChild(tr);
@@ -1095,6 +1175,57 @@ function populateStations() {
         option.textContent = station;
         stationSelect.appendChild(option);
     });
+}
+
+// NEW: Add part row to table
+function addPartRow() {
+    const tbody = document.getElementById('partsTableBody');
+    const row = document.createElement('tr');
+    row.innerHTML = `
+        <td><input type="text" class="part-number-input" placeholder="e.g., MS90727-59" style="width: 100%;"></td>
+        <td><input type="number" class="part-qty-input" min="1" placeholder="Qty" style="width: 100%;"></td>
+        <td><button type="button" class="btn-icon delete" onclick="removePartRow(this)" title="Remove">🗑️</button></td>
+    `;
+    tbody.appendChild(row);
+}
+
+// NEW: Remove part row from table
+function removePartRow(button) {
+    const tbody = document.getElementById('partsTableBody');
+    if (tbody.children.length > 1) {
+        button.closest('tr').remove();
+    } else {
+        alert('At least one part is required');
+    }
+}
+
+// NEW: Get all parts from table
+function getPartsFromTable() {
+    const rows = document.querySelectorAll('#partsTableBody tr');
+    const parts = [];
+
+    rows.forEach(row => {
+        const partNumber = row.querySelector('.part-number-input').value.trim();
+        const qty = parseInt(row.querySelector('.part-qty-input').value);
+
+        if (partNumber && qty > 0) {
+            parts.push({ part_number: partNumber, qty: qty });
+        }
+    });
+
+    return parts;
+}
+
+// NEW: Clear parts table
+function clearPartsTable() {
+    const tbody = document.getElementById('partsTableBody');
+    tbody.innerHTML = `
+        <tr>
+            <td><input type="text" class="part-number-input" placeholder="e.g., MS90727-59" style="width: 100%;"></td>
+            <td><input type="number" class="part-qty-input" min="1" placeholder="Qty" style="width: 100%;"></td>
+            <td><button type="button" class="btn-icon delete" onclick="removePartRow(this)" title="Remove">🗑️</button></td>
+        </tr>
+    `;
 }
 
 function populateProductionVehicleFilter() {
